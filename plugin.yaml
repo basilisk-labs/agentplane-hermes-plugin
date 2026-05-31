@@ -1,0 +1,3 @@
+name: agentplane
+version: "0.1.0"
+description: AgentPlane external worker-lane compatibility plugin for Hermes Kanban.

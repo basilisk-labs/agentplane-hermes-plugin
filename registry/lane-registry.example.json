@@ -1,0 +1,28 @@
+{
+  "schema": "agentplane.hermes.lane-registry.v1",
+  "lanes": [
+    {
+      "name": "agentplane-coder",
+      "match": "agentplane-*",
+      "kind": "agentplane",
+      "spawn": {
+        "command": "agentplane",
+        "args": [
+          "hermes",
+          "supervise",
+          "{agentplane_task_id}",
+          "--root",
+          "{repo}",
+          "--json"
+        ]
+      },
+      "env": [
+        "HERMES_KANBAN_TASK",
+        "HERMES_KANBAN_BOARD",
+        "HERMES_KANBAN_RUN_ID",
+        "HERMES_KANBAN_WORKSPACE",
+        "HERMES_KANBAN_CLAIM_LOCK"
+      ]
+    }
+  ]
+}

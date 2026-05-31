@@ -1,0 +1,29 @@
+[project]
+name = "agentplane-hermes-plugin"
+version = "0.1.0"
+description = "Hermes plugin for spawning AgentPlane as an external worker lane."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Basilisk Labs" }
+]
+keywords = ["agentplane", "hermes", "kanban", "worker-lanes", "ai-agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+packages = ["agentplane_hermes_plugin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
