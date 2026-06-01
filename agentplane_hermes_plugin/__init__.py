@@ -84,11 +84,17 @@ def _build_env(source: dict[str, Any]) -> dict[str, str]:
     mappings = {
         "HERMES_KANBAN_TASK": ("HERMES_KANBAN_TASK", "hermes_kanban_task", "card_id", "id"),
         "HERMES_KANBAN_BOARD": ("HERMES_KANBAN_BOARD", "hermes_kanban_board", "board"),
-        "HERMES_KANBAN_RUN_ID": ("HERMES_KANBAN_RUN_ID", "hermes_kanban_run_id", "run_id"),
+        "HERMES_KANBAN_RUN_ID": (
+            "HERMES_KANBAN_RUN_ID",
+            "hermes_kanban_run_id",
+            "run_id",
+            "current_run_id",
+        ),
         "HERMES_KANBAN_WORKSPACE": (
             "HERMES_KANBAN_WORKSPACE",
             "hermes_kanban_workspace",
             "workspace",
+            "workspace_path",
             "repo",
             "root",
         ),
@@ -163,9 +169,12 @@ def _spawn_agentplane(lane: dict[str, Any], source: dict[str, Any]) -> subproces
 def _spawn_fn_for(lane: dict[str, Any]):
     def spawn_fn(*args, **kwargs):
         source: dict[str, Any] = {}
-        for item in args:
+        for index, item in enumerate(args):
             if isinstance(item, dict):
                 source.update(item)
+            elif isinstance(item, (str, os.PathLike)):
+                if index == 1 and not _value(source, "workspace", "workspace_path", "repo", "root"):
+                    source["workspace"] = os.fspath(item)
             else:
                 for attr in [
                     "id",
@@ -173,10 +182,12 @@ def _spawn_fn_for(lane: dict[str, Any]):
                     "task_id",
                     "agentplane_task_id",
                     "workspace",
+                    "workspace_path",
                     "repo",
                     "root",
                     "board",
                     "run_id",
+                    "current_run_id",
                     "claim_lock",
                     "metadata",
                 ]:
