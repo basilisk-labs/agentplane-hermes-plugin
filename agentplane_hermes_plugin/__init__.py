@@ -63,10 +63,49 @@ def _value(source: dict[str, Any], *names: str) -> str:
     return ""
 
 
+def _metadata_value(source: dict[str, Any], *names: str) -> str:
+    metadata = source.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+
+    agentplane = metadata.get("agentplane")
+    if not isinstance(agentplane, dict):
+        return ""
+
+    for name in names:
+        value = agentplane.get(name)
+        if value is not None:
+            return str(value)
+    return ""
+
+
 def _build_env(source: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
-    for name in REQUIRED_ENV:
-        value = _value(source, name, name.lower())
+    mappings = {
+        "HERMES_KANBAN_TASK": ("HERMES_KANBAN_TASK", "hermes_kanban_task", "card_id", "id"),
+        "HERMES_KANBAN_BOARD": ("HERMES_KANBAN_BOARD", "hermes_kanban_board", "board"),
+        "HERMES_KANBAN_RUN_ID": (
+            "HERMES_KANBAN_RUN_ID",
+            "hermes_kanban_run_id",
+            "run_id",
+            "current_run_id",
+        ),
+        "HERMES_KANBAN_WORKSPACE": (
+            "HERMES_KANBAN_WORKSPACE",
+            "hermes_kanban_workspace",
+            "workspace",
+            "workspace_path",
+            "repo",
+            "root",
+        ),
+        "HERMES_KANBAN_CLAIM_LOCK": (
+            "HERMES_KANBAN_CLAIM_LOCK",
+            "hermes_kanban_claim_lock",
+            "claim_lock",
+        ),
+    }
+    for name, aliases in mappings.items():
+        value = _value(source, *aliases)
         if value:
             env[name] = value
     return env
@@ -81,6 +120,14 @@ def _build_command(lane: dict[str, Any], source: dict[str, Any]) -> list[str]:
     task_id = _value(
         source,
         "agentplane_task_id",
+        "agentplaneTaskId",
+    ) or _metadata_value(
+        source,
+        "task_id",
+        "taskId",
+        "id",
+    ) or _value(
+        source,
         "task_id",
         "id",
         "HERMES_KANBAN_TASK",
@@ -122,19 +169,27 @@ def _spawn_agentplane(lane: dict[str, Any], source: dict[str, Any]) -> subproces
 def _spawn_fn_for(lane: dict[str, Any]):
     def spawn_fn(*args, **kwargs):
         source: dict[str, Any] = {}
-        for item in args:
+        for index, item in enumerate(args):
             if isinstance(item, dict):
                 source.update(item)
+            elif isinstance(item, (str, os.PathLike)):
+                if index == 1 and not _value(source, "workspace", "workspace_path", "repo", "root"):
+                    source["workspace"] = os.fspath(item)
             else:
                 for attr in [
                     "id",
+                    "card_id",
                     "task_id",
+                    "agentplane_task_id",
                     "workspace",
+                    "workspace_path",
                     "repo",
                     "root",
                     "board",
                     "run_id",
+                    "current_run_id",
                     "claim_lock",
+                    "metadata",
                 ]:
                     if hasattr(item, attr):
                         source[attr] = getattr(item, attr)

@@ -43,7 +43,7 @@ Example lane registry:
       "kind": "agentplane",
       "spawn": {
         "command": "agentplane",
-        "args": ["hermes", "supervise", "{agentplane_task_id}", "--root", "{repo}", "--json"]
+        "args": ["hermes", "supervise", "{agentplane_task_id}", "--root", "{repo}", "--execute-step", "--json"]
       },
       "env": [
         "HERMES_KANBAN_TASK",

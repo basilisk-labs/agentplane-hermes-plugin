@@ -72,3 +72,109 @@ def test_agentplane_doctor_command_returns_json(monkeypatch):
     assert payload["registry_exists"] is True
     assert payload["lanes"][0]["kind"] == "agentplane"
 
+
+def test_build_command_reads_structured_agentplane_metadata(monkeypatch):
+    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+    lane = {
+        "spawn": {
+            "command": "agentplane",
+            "args": [
+                "hermes",
+                "supervise",
+                "{agentplane_task_id}",
+                "--root",
+                "{repo}",
+                "--execute-step",
+                "--json",
+            ],
+        },
+    }
+    source = {
+        "id": "hermes-card-123",
+        "workspace": "/workspace/project",
+        "metadata": {"agentplane": {"task_id": "202606010001-ABCDEF"}},
+    }
+
+    assert plugin._build_command(lane, source) == [
+        "/usr/local/bin/agentplane",
+        "hermes",
+        "supervise",
+        "202606010001-ABCDEF",
+        "--root",
+        "/workspace/project",
+        "--execute-step",
+        "--json",
+    ]
+
+
+def test_build_env_maps_hermes_card_fields(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "existing-card")
+    env = plugin._build_env(
+        {
+            "id": "hermes-card-123",
+            "board": "repo-board",
+            "run_id": "run-456",
+            "workspace": "/workspace/project",
+            "claim_lock": "lock-789",
+        }
+    )
+
+    assert env["HERMES_KANBAN_TASK"] == "hermes-card-123"
+    assert env["HERMES_KANBAN_BOARD"] == "repo-board"
+    assert env["HERMES_KANBAN_RUN_ID"] == "run-456"
+    assert env["HERMES_KANBAN_WORKSPACE"] == "/workspace/project"
+    assert env["HERMES_KANBAN_CLAIM_LOCK"] == "lock-789"
+
+
+def test_spawn_fn_maps_native_dispatch_task_and_workspace(monkeypatch):
+    captured = {}
+
+    class Task:
+        id = "hermes-card-123"
+        board = "repo-board"
+        current_run_id = "run-456"
+        workspace_path = "/workspace/from-task"
+        claim_lock = "lock-789"
+        metadata = {"agentplane": {"task_id": "202606010001-ABCDEF"}}
+
+    class Proc:
+        pid = 4242
+
+    def fake_spawn(lane, source):
+        captured["lane"] = lane
+        captured["source"] = source
+        return Proc()
+
+    monkeypatch.setattr(plugin, "_spawn_agentplane", fake_spawn)
+
+    lane = {"name": "agentplane-coder"}
+    pid = plugin._spawn_fn_for(lane)(Task(), "/workspace/from-dispatch")
+
+    assert pid == 4242
+    assert captured["source"]["id"] == "hermes-card-123"
+    assert captured["source"]["current_run_id"] == "run-456"
+    assert captured["source"]["workspace_path"] == "/workspace/from-task"
+    assert captured["source"]["metadata"]["agentplane"]["task_id"] == "202606010001-ABCDEF"
+
+
+def test_spawn_fn_uses_positional_workspace_when_task_lacks_workspace(monkeypatch):
+    captured = {}
+
+    class Task:
+        id = "hermes-card-123"
+        current_run_id = "run-456"
+        metadata = {"agentplane": {"task_id": "202606010001-ABCDEF"}}
+
+    class Proc:
+        pid = 4242
+
+    def fake_spawn(lane, source):
+        del lane
+        captured.update(source)
+        return Proc()
+
+    monkeypatch.setattr(plugin, "_spawn_agentplane", fake_spawn)
+
+    plugin._spawn_fn_for({"name": "agentplane-coder"})(Task(), "/workspace/from-dispatch")
+
+    assert captured["workspace"] == "/workspace/from-dispatch"

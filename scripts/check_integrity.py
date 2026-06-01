@@ -44,6 +44,7 @@ def main() -> None:
         "{agentplane_task_id}",
         "--root",
         "{repo}",
+        "--execute-step",
         "--json",
     ]:
         fail("agentplane lane args do not match the supervisor contract")
