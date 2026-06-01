@@ -13,6 +13,7 @@
           "{agentplane_task_id}",
           "--root",
           "{repo}",
+          "--execute-step",
           "--json"
         ]
       },
