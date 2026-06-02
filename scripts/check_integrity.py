@@ -53,6 +53,10 @@ def main() -> None:
     entrypoint = PLUGIN_ENTRYPOINT.read_text(encoding="utf-8")
     if "agentplane_hermes_plugin" not in entrypoint:
         fail("root plugin entrypoint does not re-export the package")
+    if "AgentPlaneLaneConfigError" not in plugin_text:
+        fail("plugin does not fail closed on invalid AgentPlane lane config")
+    if "AGENTPLANE_HERMES_ALLOWED_ROOTS" not in plugin_text:
+        fail("plugin does not enforce the optional workspace allowlist")
     if "kanban.db" in plugin_text and "never by mutating kanban.db" not in plugin_text:
         fail("plugin appears to reference kanban.db outside the safety note")
 
@@ -61,6 +65,8 @@ def main() -> None:
         "register_worker_lane",
         "AGENTPLANE_BIN",
         "AGENTPLANE_HERMES_LANE_REGISTRY",
+        "AGENTPLANE_HERMES_ALLOWED_ROOTS",
+        "metadata.agentplane.task_id",
         "hermes agentplane doctor --json",
     ]:
         if needle not in readme:

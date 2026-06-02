@@ -29,7 +29,13 @@ Hermes image/runtime must provide:
 - Node.js 24+
 - `agentplane` on `PATH` or `AGENTPLANE_BIN=/path/to/agentplane`
 - `AGENTPLANE_HERMES_LANE_REGISTRY=/opt/agentplane/lane-registry.json`
+- optional `AGENTPLANE_HERMES_ALLOWED_ROOTS=/workspace:/srv/agentplane`
+  path allowlist for spawned AgentPlane workspaces
 - Hermes plugin loader pointed at this plugin
+
+Cards dispatched to an AgentPlane lane must carry an explicit AgentPlane task id
+in `agentplane_task_id`, `agentplaneTaskId`, or `metadata.agentplane.task_id`.
+The plugin intentionally does not treat a Hermes card id as an AgentPlane task id.
 
 Example lane registry:
 
@@ -79,6 +85,7 @@ Set runtime variables:
 ```bash
 export AGENTPLANE_HERMES_LANE_REGISTRY=/opt/agentplane/lane-registry.json
 export AGENTPLANE_BIN=/usr/local/bin/agentplane
+export AGENTPLANE_HERMES_ALLOWED_ROOTS=/workspace
 ```
 
 ## Doctor

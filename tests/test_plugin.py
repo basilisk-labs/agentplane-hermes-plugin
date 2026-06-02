@@ -107,6 +107,66 @@ def test_build_command_reads_structured_agentplane_metadata(monkeypatch):
     ]
 
 
+def test_build_command_requires_agentplane_task_id(monkeypatch):
+    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+    lane = {
+        "spawn": {
+            "command": "agentplane",
+            "args": ["hermes", "supervise", "{agentplane_task_id}"],
+        },
+    }
+    source = {
+        "id": "hermes-card-123",
+        "workspace": "/workspace/project",
+    }
+
+    try:
+        plugin._build_command(lane, source)
+    except plugin.AgentPlaneLaneConfigError as exc:
+        assert "metadata.agentplane.task_id" in str(exc)
+    else:
+        raise AssertionError("expected AgentPlaneLaneConfigError")
+
+
+def test_allowed_roots_blocks_outside_workspace(monkeypatch):
+    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+    monkeypatch.setenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", "/workspace/allowed")
+    lane = {
+        "spawn": {
+            "command": "agentplane",
+            "args": ["hermes", "supervise", "{agentplane_task_id}", "--root", "{repo}"],
+        },
+    }
+    source = {
+        "workspace": "/tmp/outside",
+        "metadata": {"agentplane": {"task_id": "202606010001-ABCDEF"}},
+    }
+
+    try:
+        plugin._build_command(lane, source)
+    except plugin.AgentPlaneLaneConfigError as exc:
+        assert "AGENTPLANE_HERMES_ALLOWED_ROOTS" in str(exc)
+    else:
+        raise AssertionError("expected AgentPlaneLaneConfigError")
+
+
+def test_allowed_roots_allows_child_workspace(monkeypatch):
+    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+    monkeypatch.setenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", "/workspace")
+    lane = {
+        "spawn": {
+            "command": "agentplane",
+            "args": ["hermes", "supervise", "{agentplane_task_id}", "--root", "{repo}"],
+        },
+    }
+    source = {
+        "workspace": "/workspace/project",
+        "metadata": {"agentplane": {"task_id": "202606010001-ABCDEF"}},
+    }
+
+    assert plugin._build_command(lane, source)[-1] == "/workspace/project"
+
+
 def test_build_env_maps_hermes_card_fields(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "existing-card")
     env = plugin._build_env(

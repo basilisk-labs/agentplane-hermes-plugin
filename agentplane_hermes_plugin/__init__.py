@@ -27,6 +27,10 @@ REQUIRED_ENV = [
 ]
 
 
+class AgentPlaneLaneConfigError(RuntimeError):
+    """Raised when a Hermes card cannot safely spawn an AgentPlane worker."""
+
+
 def _registry_path() -> Path:
     return Path(os.environ.get("AGENTPLANE_HERMES_LANE_REGISTRY") or DEFAULT_REGISTRY)
 
@@ -79,6 +83,43 @@ def _metadata_value(source: dict[str, Any], *names: str) -> str:
     return ""
 
 
+def _agentplane_task_id(source: dict[str, Any]) -> str:
+    task_id = _value(source, "agentplane_task_id", "agentplaneTaskId") or _metadata_value(
+        source,
+        "task_id",
+        "taskId",
+        "id",
+    )
+    if not task_id:
+        raise AgentPlaneLaneConfigError(
+            "AgentPlane lane requires metadata.agentplane.task_id or explicit agentplane_task_id"
+        )
+    return task_id
+
+
+def _allowed_roots() -> list[Path]:
+    raw = os.environ.get("AGENTPLANE_HERMES_ALLOWED_ROOTS", "").strip()
+    if not raw:
+        return []
+    roots = []
+    for entry in raw.split(os.pathsep):
+        cleaned = entry.strip()
+        if cleaned:
+            roots.append(Path(cleaned).expanduser().resolve())
+    return roots
+
+
+def _assert_allowed_root(path_value: str) -> None:
+    roots = _allowed_roots()
+    if not roots or not path_value:
+        return
+    path = Path(path_value).expanduser().resolve()
+    if not any(path == root or root in path.parents for root in roots):
+        raise AgentPlaneLaneConfigError(
+            f"AgentPlane lane workspace is outside AGENTPLANE_HERMES_ALLOWED_ROOTS: {path}"
+        )
+
+
 def _build_env(source: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     mappings = {
@@ -117,21 +158,7 @@ def _build_command(lane: dict[str, Any], source: dict[str, Any]) -> list[str]:
     if command == "agentplane":
         command = _agentplane_bin() or command
 
-    task_id = _value(
-        source,
-        "agentplane_task_id",
-        "agentplaneTaskId",
-    ) or _metadata_value(
-        source,
-        "task_id",
-        "taskId",
-        "id",
-    ) or _value(
-        source,
-        "task_id",
-        "id",
-        "HERMES_KANBAN_TASK",
-    )
+    task_id = _agentplane_task_id(source)
     repo = _value(
         source,
         "repo",
@@ -139,6 +166,7 @@ def _build_command(lane: dict[str, Any], source: dict[str, Any]) -> list[str]:
         "workspace",
         "HERMES_KANBAN_WORKSPACE",
     )
+    _assert_allowed_root(repo)
 
     replacements = {
         "{agentplane_task_id}": task_id,
@@ -161,6 +189,7 @@ def _build_command(lane: dict[str, Any], source: dict[str, Any]) -> list[str]:
 def _spawn_agentplane(lane: dict[str, Any], source: dict[str, Any]) -> subprocess.Popen:
     command = _build_command(lane, source)
     workspace = _value(source, "workspace", "repo", "root", "HERMES_KANBAN_WORKSPACE")
+    _assert_allowed_root(workspace)
     cwd = workspace if workspace and Path(workspace).is_dir() else None
     env = _build_env(source)
     return subprocess.Popen(command, cwd=cwd, env=env)
