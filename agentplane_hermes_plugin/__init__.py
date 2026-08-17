@@ -20,7 +20,7 @@ from typing import Any
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 PROTOCOL = "agentplane.hermes.plugin.v2"
 CAPABILITY_SCHEMA = "agentplane.hermes.plugin-capabilities.v1"
 DEFAULT_REGISTRY = "/opt/agentplane/lane-registry.json"

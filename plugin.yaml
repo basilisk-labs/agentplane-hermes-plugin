@@ -1,8 +1,8 @@
 name: agentplane
-version: "0.2.1"
+version: "0.2.2"
 description: Hermes native worker-lane bridge for AgentPlane WorkOrders.
 python_dependencies:
-  - cryptography>=42
+  - cryptography>=42,<47
 config_schema:
   approval_issuer:
     type: str

@@ -33,7 +33,7 @@ def test_entrypoint_loads_as_hermes_directory_plugin() -> None:
 
     try:
         spec.loader.exec_module(module)
-        assert module.VERSION == "0.2.1"
+        assert module.VERSION == "0.2.2"
         assert callable(module.register)
     finally:
         prefix = f"{module_name}."
