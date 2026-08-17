@@ -1,20 +1,19 @@
 {
-  "schema": "agentplane.hermes.lane-registry.v1",
+  "schema": "agentplane.hermes.lane-registry.v2",
   "lanes": [
     {
       "name": "agentplane-coder",
       "match": "agentplane-*",
       "kind": "agentplane",
       "spawn": {
-        "command": "agentplane",
+        "command": "hermes",
         "args": [
-          "hermes",
+          "agentplane",
           "supervise",
+          "--task-id",
           "{agentplane_task_id}",
           "--root",
-          "{repo}",
-          "--execute-step",
-          "--json"
+          "{repo}"
         ]
       },
       "env": [
