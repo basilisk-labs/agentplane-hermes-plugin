@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 import agentplane_hermes_plugin as plugin
 
@@ -26,215 +29,344 @@ class FakeContext:
         self.commands.append(args)
 
 
-def test_registers_native_worker_lane(monkeypatch):
-    monkeypatch.setenv(
-        "AGENTPLANE_HERMES_LANE_REGISTRY",
-        str(ROOT / "registry" / "lane-registry.example.json"),
+def configure_registry(monkeypatch, tmp_path: Path) -> Path:
+    registry = tmp_path / "lane-registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "agentplane.hermes.lane-registry.v2",
+                "lanes": [
+                    {
+                        "name": "agentplane-coder",
+                        "match": "agentplane-*",
+                        "kind": "agentplane",
+                        "spawn": {
+                            "command": "hermes",
+                            "args": [
+                                "agentplane",
+                                "supervise",
+                                "--task-id",
+                                "{agentplane_task_id}",
+                                "--root",
+                                "{repo}",
+                            ],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+    monkeypatch.setenv("AGENTPLANE_HERMES_LANE_REGISTRY", str(registry))
+    monkeypatch.setenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", str(tmp_path))
+    return registry
 
+
+def fake_executable(tmp_path: Path, name: str) -> Path:
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def semantic(work_order_id: str) -> dict:
+    return {
+        "schema_version": 2,
+        "kind": "agent_semantic_result",
+        "work_order_id": work_order_id,
+        "status": "completed",
+        "summary": "Hermes completed the bounded episode.",
+        "findings": [],
+        "uncertainty": [],
+    }
+
+
+def test_registers_all_native_surfaces(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    monkeypatch.setattr(plugin, "_NATIVE_WORKER_LANE_API", False)
     ctx = FakeContext()
+
     plugin.register(ctx)
 
     assert len(ctx.lanes) == 1
     assert ctx.lanes[0]["match"] == "agentplane-*"
-    assert ctx.lanes[0]["profile_exists"] is True
+    assert "profile_exists" not in ctx.lanes[0]
     assert [command["name"] for command in ctx.cli_commands] == ["agentplane"]
+    assert ctx.cli_commands[0]["handler_fn"] is plugin._cli_handler
     assert [command[0] for command in ctx.commands] == ["agentplane_doctor"]
+    assert plugin._NATIVE_WORKER_LANE_API is True
 
 
-def test_doctor_payload_reads_registry(monkeypatch):
-    monkeypatch.setenv(
-        "AGENTPLANE_HERMES_LANE_REGISTRY",
-        str(ROOT / "registry" / "lane-registry.example.json"),
-    )
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+def test_setup_cli_exposes_doctor_run_and_supervise():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    plugin._setup_cli(parser)
+
+    assert parser.parse_args(["doctor", "--json"]).agentplane_command == "doctor"
+    assert parser.parse_args(["run"]).agentplane_command == "run"
+    args = parser.parse_args(["supervise", "--task-id", "TASK", "--root", "/repo"])
+    assert args.agentplane_command == "supervise"
+    assert args.task_id == "TASK"
+
+
+def test_doctor_fails_closed_without_capabilities(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTPLANE_HERMES_LANE_REGISTRY", str(tmp_path / "missing.json"))
+    monkeypatch.delenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setattr(plugin, "_NATIVE_WORKER_LANE_API", False)
 
     payload = plugin._doctor_payload()
 
-    assert payload["registry_exists"] is True
-    assert payload["agentplane_bin"] == "/usr/local/bin/agentplane"
-    assert payload["lanes"][0]["match"] == "agentplane-*"
+    assert payload["ok"] is False
+    assert payload["protocol"] == "agentplane.hermes.plugin.v2"
+    assert payload["checks"]["registry_exists"] is False
+    assert payload["checks"]["allowed_roots_fail_closed"] is False
 
 
-def test_agentplane_doctor_command_returns_json(monkeypatch):
-    monkeypatch.setenv(
-        "AGENTPLANE_HERMES_LANE_REGISTRY",
-        str(ROOT / "registry" / "lane-registry.example.json"),
-    )
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
+def test_doctor_proves_protocol_v2_installation(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    agentplane = fake_executable(tmp_path, "agentplane")
+    hermes = fake_executable(tmp_path, "hermes")
+    monkeypatch.setenv("AGENTPLANE_BIN", str(agentplane))
+    monkeypatch.setenv("HERMES_BIN", str(hermes))
+    monkeypatch.setattr(plugin, "_NATIVE_WORKER_LANE_API", True)
 
-    ctx = FakeContext()
-    plugin.register(ctx)
-    doctor = ctx.commands[0][1]
-    payload = json.loads(doctor())
+    payload = plugin._doctor_payload()
 
-    assert payload["registry_exists"] is True
-    assert payload["lanes"][0]["kind"] == "agentplane"
+    assert payload["ok"] is True
+    assert payload["schema"] == "agentplane.hermes.plugin-capabilities.v1"
+    assert payload["commands"] == [
+        "agentplane doctor",
+        "agentplane run",
+        "agentplane supervise",
+    ]
 
 
-def test_build_command_reads_structured_agentplane_metadata(monkeypatch):
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
-    lane = {
-        "spawn": {
-            "command": "agentplane",
-            "args": [
-                "hermes",
-                "supervise",
-                "{agentplane_task_id}",
-                "--root",
-                "{repo}",
-                "--execute-step",
-                "--json",
-            ],
-        },
-    }
+def test_allowed_roots_is_mandatory(monkeypatch):
+    monkeypatch.delenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", raising=False)
+
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="must contain"):
+        plugin._assert_allowed_root("/workspace/project")
+
+
+def test_allowed_roots_blocks_outside_workspace(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    monkeypatch.setenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", str(allowed))
+
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="outside"):
+        plugin._assert_allowed_root(str(tmp_path / "outside"))
+
+
+def test_build_command_uses_native_plugin_supervisor(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    hermes = fake_executable(tmp_path, "hermes")
+    monkeypatch.setenv("HERMES_BIN", str(hermes))
+    lane = plugin._agentplane_lanes()[0]
     source = {
-        "id": "hermes-card-123",
-        "workspace": "/workspace/project",
+        "workspace": str(tmp_path),
         "metadata": {"agentplane": {"task_id": "202606010001-ABCDEF"}},
     }
 
     assert plugin._build_command(lane, source) == [
-        "/usr/local/bin/agentplane",
-        "hermes",
+        str(hermes),
+        "agentplane",
         "supervise",
+        "--task-id",
         "202606010001-ABCDEF",
         "--root",
-        "/workspace/project",
-        "--execute-step",
-        "--json",
+        str(tmp_path),
     ]
 
 
-def test_build_command_requires_agentplane_task_id(monkeypatch):
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
-    lane = {
-        "spawn": {
-            "command": "agentplane",
-            "args": ["hermes", "supervise", "{agentplane_task_id}"],
-        },
-    }
-    source = {
-        "id": "hermes-card-123",
-        "workspace": "/workspace/project",
-    }
+def test_build_command_requires_agentplane_task_id(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    lane = plugin._agentplane_lanes()[0]
 
-    try:
-        plugin._build_command(lane, source)
-    except plugin.AgentPlaneLaneConfigError as exc:
-        assert "metadata.agentplane.task_id" in str(exc)
-    else:
-        raise AssertionError("expected AgentPlaneLaneConfigError")
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="metadata.agentplane.task_id"):
+        plugin._build_command(lane, {"workspace": str(tmp_path)})
 
 
-def test_allowed_roots_blocks_outside_workspace(monkeypatch):
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
-    monkeypatch.setenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", "/workspace/allowed")
-    lane = {
-        "spawn": {
-            "command": "agentplane",
-            "args": ["hermes", "supervise", "{agentplane_task_id}", "--root", "{repo}"],
-        },
-    }
-    source = {
-        "workspace": "/tmp/outside",
-        "metadata": {"agentplane": {"task_id": "202606010001-ABCDEF"}},
-    }
+def test_build_env_does_not_inherit_unapproved_secret(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "old-card")
 
-    try:
-        plugin._build_command(lane, source)
-    except plugin.AgentPlaneLaneConfigError as exc:
-        assert "AGENTPLANE_HERMES_ALLOWED_ROOTS" in str(exc)
-    else:
-        raise AssertionError("expected AgentPlaneLaneConfigError")
-
-
-def test_allowed_roots_allows_child_workspace(monkeypatch):
-    monkeypatch.setenv("AGENTPLANE_BIN", "/usr/local/bin/agentplane")
-    monkeypatch.setenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", "/workspace")
-    lane = {
-        "spawn": {
-            "command": "agentplane",
-            "args": ["hermes", "supervise", "{agentplane_task_id}", "--root", "{repo}"],
-        },
-    }
-    source = {
-        "workspace": "/workspace/project",
-        "metadata": {"agentplane": {"task_id": "202606010001-ABCDEF"}},
-    }
-
-    assert plugin._build_command(lane, source)[-1] == "/workspace/project"
-
-
-def test_build_env_maps_hermes_card_fields(monkeypatch):
-    monkeypatch.setenv("HERMES_KANBAN_TASK", "existing-card")
     env = plugin._build_env(
         {
-            "id": "hermes-card-123",
+            "id": "card-123",
             "board": "repo-board",
             "run_id": "run-456",
-            "workspace": "/workspace/project",
+            "workspace": str(tmp_path),
             "claim_lock": "lock-789",
         }
     )
 
-    assert env["HERMES_KANBAN_TASK"] == "hermes-card-123"
-    assert env["HERMES_KANBAN_BOARD"] == "repo-board"
-    assert env["HERMES_KANBAN_RUN_ID"] == "run-456"
-    assert env["HERMES_KANBAN_WORKSPACE"] == "/workspace/project"
-    assert env["HERMES_KANBAN_CLAIM_LOCK"] == "lock-789"
+    assert env["HERMES_KANBAN_TASK"] == "card-123"
+    assert env["AGENTPLANE_HERMES_PLUGIN_PROTOCOL"] == plugin.PROTOCOL
+    assert env["AGENTPLANE_HERMES_NATIVE_WORKER_LANE_API"] == "1"
+    assert "UNRELATED_SECRET" not in env
 
 
-def test_spawn_fn_maps_native_dispatch_task_and_workspace(monkeypatch):
-    captured = {}
+def test_build_env_forwards_only_explicit_provider_secret(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "allowed-secret")
+    monkeypatch.setenv("OTHER_SECRET", "blocked-secret")
+    monkeypatch.setenv("AGENTPLANE_HERMES_FORWARD_ENV", "OPENROUTER_API_KEY")
 
-    class Task:
-        id = "hermes-card-123"
-        board = "repo-board"
-        current_run_id = "run-456"
-        workspace_path = "/workspace/from-task"
-        claim_lock = "lock-789"
-        metadata = {"agentplane": {"task_id": "202606010001-ABCDEF"}}
+    env = plugin._minimal_env()
 
-    class Proc:
-        pid = 4242
-
-    def fake_spawn(lane, source):
-        captured["lane"] = lane
-        captured["source"] = source
-        return Proc()
-
-    monkeypatch.setattr(plugin, "_spawn_agentplane", fake_spawn)
-
-    lane = {"name": "agentplane-coder"}
-    pid = plugin._spawn_fn_for(lane)(Task(), "/workspace/from-dispatch")
-
-    assert pid == 4242
-    assert captured["source"]["id"] == "hermes-card-123"
-    assert captured["source"]["current_run_id"] == "run-456"
-    assert captured["source"]["workspace_path"] == "/workspace/from-task"
-    assert captured["source"]["metadata"]["agentplane"]["task_id"] == "202606010001-ABCDEF"
+    assert env["OPENROUTER_API_KEY"] == "allowed-secret"
+    assert "OTHER_SECRET" not in env
 
 
-def test_spawn_fn_uses_positional_workspace_when_task_lacks_workspace(monkeypatch):
-    captured = {}
+def test_spawn_requires_complete_native_claim(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    hermes = fake_executable(tmp_path, "hermes")
+    monkeypatch.setenv("HERMES_BIN", str(hermes))
+    lane = plugin._agentplane_lanes()[0]
+    source = {
+        "id": "card-123",
+        "workspace": str(tmp_path),
+        "metadata": {"agentplane": {"task_id": "TASK"}},
+    }
 
-    class Task:
-        id = "hermes-card-123"
-        current_run_id = "run-456"
-        metadata = {"agentplane": {"task_id": "202606010001-ABCDEF"}}
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="claim is incomplete"):
+        plugin._spawn_agentplane(lane, source)
 
-    class Proc:
-        pid = 4242
 
-    def fake_spawn(lane, source):
-        del lane
-        captured.update(source)
-        return Proc()
+def test_runner_run_writes_validated_result_atomically(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    run_dir = tmp_path / ".agentplane" / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    bundle = run_dir / "bundle.json"
+    bootstrap = run_dir / "bootstrap.md"
+    result = run_dir / "result.json"
+    bundle.write_text(
+        json.dumps(
+            {
+                "repository": {"git_root": str(tmp_path)},
+                "work_order": {"work_order_id": "work-order-1", "role": "EXECUTOR"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    bootstrap.write_text("Perform the bounded implementation.", encoding="utf-8")
+    monkeypatch.setenv("AGENTPLANE_RUNNER_BUNDLE_PATH", str(bundle))
+    monkeypatch.setenv("AGENTPLANE_RUNNER_BOOTSTRAP_PATH", str(bootstrap))
+    monkeypatch.setenv("AGENTPLANE_RUNNER_RUN_DIR", str(run_dir))
+    monkeypatch.setenv("AGENTPLANE_RUNNER_RESULT_PATH", str(result))
+    monkeypatch.setenv("AGENTPLANE_HERMES_AGENT_COMMAND", '["fake-hermes"]')
+    monkeypatch.setattr(
+        plugin,
+        "_run_process",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(semantic("work-order-1")), stderr=""
+        ),
+    )
 
-    monkeypatch.setattr(plugin, "_spawn_agentplane", fake_spawn)
+    payload = plugin._run_runner_work_order()
 
-    plugin._spawn_fn_for({"name": "agentplane-coder"})(Task(), "/workspace/from-dispatch")
+    assert payload["status"] == "completed"
+    assert json.loads(result.read_text(encoding="utf-8")) == payload
+    assert oct(result.stat().st_mode & 0o777) == "0o600"
 
-    assert captured["workspace"] == "/workspace/from-dispatch"
+
+def test_runner_rejects_wrong_work_order_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTPLANE_HERMES_AGENT_COMMAND", '["fake-hermes"]')
+    monkeypatch.setattr(
+        plugin,
+        "_run_process",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(semantic("wrong-work-order")), stderr=""
+        ),
+    )
+
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="work_order_id"):
+        plugin._execute_work_order(
+            {"work_order_id": "expected", "role": "EXECUTOR"},
+            cwd=tmp_path,
+            env={},
+        )
+
+
+def test_supervise_uses_exact_result_path_and_resume_argv(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    for name, value in {
+        "HERMES_KANBAN_TASK": "card-1",
+        "HERMES_KANBAN_BOARD": "board-1",
+        "HERMES_KANBAN_RUN_ID": "run-1",
+        "HERMES_KANBAN_WORKSPACE": str(tmp_path),
+        "HERMES_KANBAN_CLAIM_LOCK": "lock-1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    exchange_dir = tmp_path / "exchange"
+    exchange_dir.mkdir()
+    (exchange_dir / "work-order.json").write_text(
+        json.dumps({"work_order_id": "wo-1", "role": "EXECUTOR"}), encoding="utf-8"
+    )
+    result_path = exchange_dir / "result.json"
+    resume = ["agentplane", "task", "advance", "TASK", "--result", str(result_path), "--agent-json"]
+    issued = {
+        "task_id": "TASK",
+        "transition_id": "tr_123",
+        "state_fingerprint": "sha256:abc",
+        "action": {"kind": "agent_episode"},
+        "exchange": {
+            "directory": str(exchange_dir),
+            "work_order_ref": "work-order.json",
+            "result_path": str(result_path),
+            "resume_argv": resume,
+        },
+    }
+    terminal = {"action": {"kind": "approval_required"}, "stop": {"reason": "authority_boundary"}}
+    calls = []
+
+    class Guard:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def assert_current(self):
+            pass
+
+        def __exit__(self, *args):
+            pass
+
+    def invoke(argv, **kwargs):
+        calls.append(argv)
+        return issued if len(calls) == 1 else terminal
+
+    monkeypatch.setattr(plugin, "_advance_command", lambda: ["ap"])
+    monkeypatch.setattr(plugin, "_invoke_json", invoke)
+    monkeypatch.setattr(plugin, "_HeartbeatGuard", Guard)
+    monkeypatch.setattr(plugin, "_execute_work_order", lambda *args, **kwargs: semantic("wo-1"))
+
+    result = plugin._supervise("TASK", str(tmp_path))
+
+    assert calls == [["ap", "task", "advance", "TASK", "--agent-json"], resume]
+    envelope = json.loads(result_path.read_text(encoding="utf-8"))
+    assert envelope["transition_id"] == "tr_123"
+    assert envelope["state_fingerprint"] == "sha256:abc"
+    assert envelope["result"]["work_order_id"] == "wo-1"
+    assert result["action"]["kind"] == "approval_required"
+
+
+def test_heartbeat_rejects_stale_run(monkeypatch, tmp_path):
+    hermes = fake_executable(tmp_path, "hermes")
+    monkeypatch.setenv("HERMES_BIN", str(hermes))
+    env = {
+        "HERMES_KANBAN_TASK": "card-1",
+        "HERMES_KANBAN_RUN_ID": "run-1",
+        "HERMES_KANBAN_CLAIM_LOCK": "lock-1",
+    }
+    monkeypatch.setattr(
+        plugin,
+        "_run_process",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, stdout="", stderr="not current"),
+    )
+
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="not current"):
+        with plugin._HeartbeatGuard(tmp_path, env):
+            pass

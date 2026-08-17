@@ -36,16 +36,15 @@ def main() -> None:
         fail("agentplane lane must match agentplane-*")
 
     spawn = lane.get("spawn") or {}
-    if spawn.get("command") != "agentplane":
-        fail("agentplane lane command must be agentplane")
+    if spawn.get("command") != "hermes":
+        fail("agentplane lane command must be hermes")
     if spawn.get("args") != [
-        "hermes",
+        "agentplane",
         "supervise",
+        "--task-id",
         "{agentplane_task_id}",
         "--root",
         "{repo}",
-        "--execute-step",
-        "--json",
     ]:
         fail("agentplane lane args do not match the supervisor contract")
 
@@ -56,9 +55,17 @@ def main() -> None:
     if "AgentPlaneLaneConfigError" not in plugin_text:
         fail("plugin does not fail closed on invalid AgentPlane lane config")
     if "AGENTPLANE_HERMES_ALLOWED_ROOTS" not in plugin_text:
-        fail("plugin does not enforce the optional workspace allowlist")
-    if "kanban.db" in plugin_text and "never by mutating kanban.db" not in plugin_text:
-        fail("plugin appears to reference kanban.db outside the safety note")
+        fail("plugin does not enforce the mandatory workspace allowlist")
+    if "kanban.db" in plugin_text:
+        fail("plugin must not reference the Hermes database")
+    for needle in [
+        "agentplane.hermes.plugin.v2",
+        "AGENTPLANE_RUNNER_RESULT_PATH",
+        "resume_argv",
+        "_HeartbeatGuard",
+    ]:
+        if needle not in plugin_text:
+            fail(f"plugin is missing protocol surface {needle}")
 
     readme = README.read_text(encoding="utf-8")
     for needle in [
@@ -68,6 +75,9 @@ def main() -> None:
         "AGENTPLANE_HERMES_ALLOWED_ROOTS",
         "metadata.agentplane.task_id",
         "hermes agentplane doctor --json",
+        "hermes agentplane run",
+        "hermes agentplane supervise",
+        "agentplane.hermes.plugin.v2",
     ]:
         if needle not in readme:
             fail(f"README is missing {needle}")
