@@ -1,6 +1,6 @@
 [project]
 name = "agentplane-hermes-plugin"
-version = "0.2.0"
+version = "0.2.1"
 description = "Hermes native worker-lane bridge for AgentPlane WorkOrders."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -48,8 +48,8 @@ def main() -> None:
 
     plugin_text = PLUGIN.read_text(encoding="utf-8")
     entrypoint = PLUGIN_ENTRYPOINT.read_text(encoding="utf-8")
-    if "agentplane_hermes_plugin" not in entrypoint:
-        fail("root plugin entrypoint does not re-export the package")
+    if "from .agentplane_hermes_plugin import *" not in entrypoint:
+        fail("root plugin entrypoint must use a package-relative re-export")
     if "AgentPlaneLaneConfigError" not in plugin_text:
         fail("plugin does not fail closed on invalid AgentPlane lane config")
     if "AGENTPLANE_HERMES_ALLOWED_ROOTS" not in plugin_text:
