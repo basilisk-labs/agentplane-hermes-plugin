@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
+from base64 import b64encode, urlsafe_b64decode
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import agentplane_hermes_plugin as plugin
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,8 +26,11 @@ class FakeContext:
     def register_cli_command(self, **kwargs):
         self.cli_commands.append(kwargs)
 
-    def register_command(self, *args):
-        self.commands.append(args)
+    def register_command(self, *args, **kwargs):
+        self.commands.append((args, kwargs))
+
+    def get_config(self, key, default=None):
+        return default
 
 
 def configure_registry(monkeypatch, tmp_path: Path) -> Path:
@@ -69,6 +73,24 @@ def fake_executable(tmp_path: Path, name: str) -> Path:
     return path
 
 
+def configure_approval_key(monkeypatch) -> Ed25519PrivateKey:
+    key = Ed25519PrivateKey.generate()
+    private_der = key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    monkeypatch.setenv(
+        plugin.APPROVAL_PRIVATE_KEY_ENV, b64encode(private_der).decode("ascii")
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_APPROVAL_CONFIG",
+        {"issuer": "hermes-dialog", "subject": "denis", "ttl_minutes": 10},
+    )
+    return key
+
+
 def semantic(work_order_id: str) -> dict:
     return {
         "schema_version": 2,
@@ -93,11 +115,14 @@ def test_registers_all_native_surfaces(monkeypatch, tmp_path):
     assert "profile_exists" not in ctx.lanes[0]
     assert [command["name"] for command in ctx.cli_commands] == ["agentplane"]
     assert ctx.cli_commands[0]["handler_fn"] is plugin._cli_handler
-    assert [command[0] for command in ctx.commands] == ["agentplane_doctor"]
+    assert [command[0][0] for command in ctx.commands] == [
+        "agentplane_doctor",
+        "agentplane_approve",
+    ]
     assert plugin._NATIVE_WORKER_LANE_API is True
 
 
-def test_setup_cli_exposes_doctor_run_and_supervise():
+def test_setup_cli_exposes_approve_doctor_run_and_supervise():
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -105,13 +130,19 @@ def test_setup_cli_exposes_doctor_run_and_supervise():
 
     assert parser.parse_args(["doctor", "--json"]).agentplane_command == "doctor"
     assert parser.parse_args(["run"]).agentplane_command == "run"
+    assert (
+        parser.parse_args(["approve", "--task-id", "TASK"]).agentplane_command
+        == "approve"
+    )
     args = parser.parse_args(["supervise", "--task-id", "TASK", "--root", "/repo"])
     assert args.agentplane_command == "supervise"
     assert args.task_id == "TASK"
 
 
 def test_doctor_fails_closed_without_capabilities(monkeypatch, tmp_path):
-    monkeypatch.setenv("AGENTPLANE_HERMES_LANE_REGISTRY", str(tmp_path / "missing.json"))
+    monkeypatch.setenv(
+        "AGENTPLANE_HERMES_LANE_REGISTRY", str(tmp_path / "missing.json")
+    )
     monkeypatch.delenv("AGENTPLANE_HERMES_ALLOWED_ROOTS", raising=False)
     monkeypatch.setattr(plugin, "_NATIVE_WORKER_LANE_API", False)
 
@@ -130,12 +161,14 @@ def test_doctor_proves_protocol_v2_installation(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTPLANE_BIN", str(agentplane))
     monkeypatch.setenv("HERMES_BIN", str(hermes))
     monkeypatch.setattr(plugin, "_NATIVE_WORKER_LANE_API", True)
+    configure_approval_key(monkeypatch)
 
     payload = plugin._doctor_payload()
 
     assert payload["ok"] is True
     assert payload["schema"] == "agentplane.hermes.plugin-capabilities.v1"
     assert payload["commands"] == [
+        "agentplane approve",
         "agentplane doctor",
         "agentplane run",
         "agentplane supervise",
@@ -183,7 +216,9 @@ def test_build_command_requires_agentplane_task_id(monkeypatch, tmp_path):
     configure_registry(monkeypatch, tmp_path)
     lane = plugin._agentplane_lanes()[0]
 
-    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="metadata.agentplane.task_id"):
+    with pytest.raises(
+        plugin.AgentPlaneLaneConfigError, match="metadata.agentplane.task_id"
+    ):
         plugin._build_command(lane, {"workspace": str(tmp_path)})
 
 
@@ -205,6 +240,8 @@ def test_build_env_does_not_inherit_unapproved_secret(monkeypatch, tmp_path):
     assert env["HERMES_KANBAN_TASK"] == "card-123"
     assert env["AGENTPLANE_HERMES_PLUGIN_PROTOCOL"] == plugin.PROTOCOL
     assert env["AGENTPLANE_HERMES_NATIVE_WORKER_LANE_API"] == "1"
+    assert env["AGENTPLANE_HERMES_APPROVAL_RECEIPT_BRIDGE"] == "0"
+    assert plugin.APPROVAL_PRIVATE_KEY_ENV not in env
     assert "UNRELATED_SECRET" not in env
 
 
@@ -217,6 +254,146 @@ def test_build_env_forwards_only_explicit_provider_secret(monkeypatch):
 
     assert env["OPENROUTER_API_KEY"] == "allowed-secret"
     assert "OTHER_SECRET" not in env
+
+
+def test_approval_key_stays_out_of_worker_environment(monkeypatch):
+    configure_approval_key(monkeypatch)
+    monkeypatch.setenv("AGENTPLANE_HERMES_FORWARD_ENV", plugin.APPROVAL_PRIVATE_KEY_ENV)
+
+    env = plugin._minimal_env()
+
+    assert env["AGENTPLANE_HERMES_APPROVAL_RECEIPT_BRIDGE"] == "1"
+    assert plugin.APPROVAL_PRIVATE_KEY_ENV not in env
+
+
+def test_signed_approval_receipt_is_bound_and_verifiable(monkeypatch):
+    key = configure_approval_key(monkeypatch)
+    request = {
+        "approval_type": "side_effect",
+        "task_id": "TASK",
+        "authority_reference": "authority-1",
+        "state_fingerprint": "sha256:" + "a" * 64,
+        "operation_id": "pr.open",
+        "operation_digest": "sha256:" + "b" * 64,
+        "state_scope_digest": "sha256:" + "c" * 64,
+    }
+
+    encoded = plugin._signed_approval_receipt(request)
+    padded = encoded + "=" * (-len(encoded) % 4)
+    receipt = json.loads(urlsafe_b64decode(padded).decode("utf-8"))
+    signature = receipt.pop("signature")
+    canonical = json.dumps(
+        receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    signature_padded = signature + "=" * (-len(signature) % 4)
+    key.public_key().verify(
+        urlsafe_b64decode(signature_padded), canonical.encode("utf-8")
+    )
+
+    assert receipt["task_id"] == "TASK"
+    assert receipt["operation_digest"] == request["operation_digest"]
+    assert receipt["state_scope_digest"] == request["state_scope_digest"]
+    assert receipt["subject"] == "denis"
+
+
+def test_approve_executes_only_exact_packet_argv_and_fetches_fresh_packet(
+    monkeypatch, tmp_path
+):
+    configure_registry(monkeypatch, tmp_path)
+    configure_approval_key(monkeypatch)
+    request = {
+        "approval_type": "plan_approval",
+        "task_id": "TASK",
+        "authority_reference": "plan",
+        "state_fingerprint": "sha256:" + "a" * 64,
+        "operation_id": None,
+        "operation_digest": None,
+        "state_scope_digest": None,
+    }
+    issued = {
+        "action": {"kind": "approval_required"},
+        "operator_action": {
+            "kind": "approve_plan",
+            "required_role": "USER",
+            "cwd": str(tmp_path),
+            "argv": [
+                "agentplane",
+                "task",
+                "plan",
+                "approve",
+                "TASK",
+                "--approval-receipt",
+                plugin.APPROVAL_RECEIPT_PLACEHOLDER,
+            ],
+            "approval_receipt": {
+                "schema_version": 1,
+                "format": "base64url-json+ed25519",
+                "request": request,
+            },
+        },
+    }
+    fresh = {
+        "action": {"kind": "agent_episode"},
+        "stop": {"reason": "semantic_boundary"},
+    }
+    packets = iter([issued, fresh])
+    executed = []
+    monkeypatch.setattr(plugin, "_advance_command", lambda: ["ap"])
+    monkeypatch.setattr(plugin, "_invoke_json", lambda *args, **kwargs: next(packets))
+
+    def run(argv, **kwargs):
+        executed.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(plugin, "_run_process", run)
+
+    result = plugin._approve("TASK", str(tmp_path))
+
+    assert len(executed) == 1
+    argv, invocation = executed[0]
+    assert argv[:6] == [
+        "agentplane",
+        "task",
+        "plan",
+        "approve",
+        "TASK",
+        "--approval-receipt",
+    ]
+    assert len(argv) == 7
+    assert argv[6] != plugin.APPROVAL_RECEIPT_PLACEHOLDER
+    assert plugin.APPROVAL_PRIVATE_KEY_ENV not in invocation["env"]
+    assert result == {
+        "schema": "agentplane.hermes.approval-result.v1",
+        "task_id": "TASK",
+        "approved_kind": "approve_plan",
+        "actor": "USER:denis@hermes-dialog",
+        "next_action": "agent_episode",
+        "next_stop_reason": "semantic_boundary",
+    }
+
+
+def test_approval_bridge_refuses_provider_merge(monkeypatch, tmp_path):
+    configure_registry(monkeypatch, tmp_path)
+    configure_approval_key(monkeypatch)
+    packet = {
+        "action": {"kind": "approval_required"},
+        "operator_action": {
+            "kind": "approve_provider_merge",
+            "required_role": "USER",
+            "cwd": str(tmp_path),
+            "argv": None,
+            "approval_receipt": {
+                "schema_version": 1,
+                "format": "base64url-json+ed25519",
+                "request": {},
+            },
+        },
+    }
+    monkeypatch.setattr(plugin, "_advance_command", lambda: ["ap"])
+    monkeypatch.setattr(plugin, "_invoke_json", lambda *args, **kwargs: packet)
+
+    with pytest.raises(plugin.AgentPlaneLaneConfigError, match="cannot be executed"):
+        plugin._approve("TASK", str(tmp_path))
 
 
 def test_spawn_requires_complete_native_claim(monkeypatch, tmp_path):
@@ -305,7 +482,15 @@ def test_supervise_uses_exact_result_path_and_resume_argv(monkeypatch, tmp_path)
         json.dumps({"work_order_id": "wo-1", "role": "EXECUTOR"}), encoding="utf-8"
     )
     result_path = exchange_dir / "result.json"
-    resume = ["agentplane", "task", "advance", "TASK", "--result", str(result_path), "--agent-json"]
+    resume = [
+        "agentplane",
+        "task",
+        "advance",
+        "TASK",
+        "--result",
+        str(result_path),
+        "--agent-json",
+    ]
     issued = {
         "task_id": "TASK",
         "transition_id": "tr_123",
@@ -318,7 +503,10 @@ def test_supervise_uses_exact_result_path_and_resume_argv(monkeypatch, tmp_path)
             "resume_argv": resume,
         },
     }
-    terminal = {"action": {"kind": "approval_required"}, "stop": {"reason": "authority_boundary"}}
+    terminal = {
+        "action": {"kind": "approval_required"},
+        "stop": {"reason": "authority_boundary"},
+    }
     calls = []
 
     class Guard:
@@ -341,7 +529,9 @@ def test_supervise_uses_exact_result_path_and_resume_argv(monkeypatch, tmp_path)
     monkeypatch.setattr(plugin, "_advance_command", lambda: ["ap"])
     monkeypatch.setattr(plugin, "_invoke_json", invoke)
     monkeypatch.setattr(plugin, "_HeartbeatGuard", Guard)
-    monkeypatch.setattr(plugin, "_execute_work_order", lambda *args, **kwargs: semantic("wo-1"))
+    monkeypatch.setattr(
+        plugin, "_execute_work_order", lambda *args, **kwargs: semantic("wo-1")
+    )
 
     result = plugin._supervise("TASK", str(tmp_path))
 
@@ -364,7 +554,9 @@ def test_heartbeat_rejects_stale_run(monkeypatch, tmp_path):
     monkeypatch.setattr(
         plugin,
         "_run_process",
-        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, stdout="", stderr="not current"),
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 1, stdout="", stderr="not current"
+        ),
     )
 
     with pytest.raises(plugin.AgentPlaneLaneConfigError, match="not current"):

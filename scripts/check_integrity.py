@@ -25,9 +25,7 @@ def main() -> None:
 
     registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
     lanes = registry.get("lanes", [])
-    agentplane_lanes = [
-        lane for lane in lanes if lane.get("kind") == "agentplane"
-    ]
+    agentplane_lanes = [lane for lane in lanes if lane.get("kind") == "agentplane"]
     if not agentplane_lanes:
         fail("registry has no agentplane lane")
 
@@ -63,6 +61,8 @@ def main() -> None:
         "AGENTPLANE_RUNNER_RESULT_PATH",
         "resume_argv",
         "_HeartbeatGuard",
+        "AGENTPLANE_HERMES_APPROVAL_PRIVATE_KEY_PKCS8",
+        "approval_receipt_bridge",
     ]:
         if needle not in plugin_text:
             fail(f"plugin is missing protocol surface {needle}")
@@ -77,6 +77,8 @@ def main() -> None:
         "hermes agentplane doctor --json",
         "hermes agentplane run",
         "hermes agentplane supervise",
+        "hermes agentplane approve",
+        "/agentplane_approve",
         "agentplane.hermes.plugin.v2",
     ]:
         if needle not in readme:

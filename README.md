@@ -23,6 +23,7 @@ The plugin registers one native Hermes command group:
 hermes agentplane doctor --json
 hermes agentplane run
 hermes agentplane supervise --task-id <agentplane-task-id> --root <repo>
+hermes agentplane approve --task-id <agentplane-task-id> [--root <repo>]
 ```
 
 `run` is the AgentPlane custom-runner entrypoint. It reads the runner bundle and bootstrap from the
@@ -32,8 +33,16 @@ validates `AgentSemanticResult v2`, and atomically writes the exact result path.
 `supervise` is the normal native worker-lane entrypoint. It requests a fresh
 `ap task advance <id> --agent-json` packet, executes only `agent_episode`, writes the typed result
 to the exact `exchange.result_path`, and resumes with the exact `exchange.resume_argv`. It stops at
-approval, human-input, external-wait, recovery, framework, or terminal boundaries. Formal
-AgentPlane transitions remain invisible to the Hermes user but are never delegated to the model.
+human-input, external-wait, recovery, framework, or terminal boundaries. AgentPlane resolves
+repository-policy side effects internally. Formal transitions remain invisible to the Hermes user
+but are never delegated to the model.
+
+`approve` is the trusted conversational bridge for a current `approval_required` packet. The same
+operation is registered as `/agentplane_approve <task-id> [workspace-root]`, so a user can approve
+inside a Hermes conversation without copying a state fingerprint or running a terminal command.
+It signs only the packet's exact `operator_action.approval_receipt.request`, substitutes only the
+receipt placeholder in the supplied argv, executes it, and requests a fresh packet. Provider merge
+packets deliberately have no executable argv and are rejected by this bridge.
 
 ## Runtime contract
 
@@ -47,6 +56,25 @@ export AGENTPLANE_BIN=/usr/local/bin/agentplane
 ```
 
 The root allowlist is mandatory. Empty means deny all workspaces.
+
+Configure the non-secret approval identity in Hermes `config.yaml`:
+
+```yaml
+plugins:
+  entries:
+    agentplane:
+      settings:
+        approval_issuer: hermes-dialog
+        approval_subject: owner
+        approval_ttl_minutes: 10
+```
+
+The trusted Hermes host process also needs an Ed25519 PKCS8 DER key encoded as base64 in the secret
+environment variable `AGENTPLANE_HERMES_APPROVAL_PRIVATE_KEY_PKCS8`. This secret is intentionally
+absent from the worker environment, so an LLM episode or terminal subprocess cannot invoke the
+signer. `hermes agentplane doctor --json` reports the matching `approval_bridge.public_key_spki`;
+configure that public key under AgentPlane
+`authority.approval_receipts.trusted_issuers[].public_key_spki` with the same issuer id.
 
 The plugin does not inherit the complete parent environment. It forwards a small runtime allowlist,
 the AgentPlane runner fields, and the current Hermes claim. Provider credentials that must be
@@ -63,7 +91,22 @@ Every plugin-owned AgentPlane process asserts:
 ```text
 AGENTPLANE_HERMES_PLUGIN_PROTOCOL=agentplane.hermes.plugin.v2
 AGENTPLANE_HERMES_NATIVE_WORKER_LANE_API=1
+AGENTPLANE_HERMES_APPROVAL_RECEIPT_BRIDGE=1
 ```
+
+The third assertion is emitted only when the trusted host process loaded a valid Ed25519 key. The
+private key variable itself is never forwarded.
+
+## Approval and autonomous side effects
+
+The primary AgentPlane plan always requires an explicit user decision. The user invokes
+`/agentplane_approve` from Hermes, and the trusted plugin records the signed, short-lived,
+state-bound receipt. The LLM cannot infer approval from prose or manufacture this receipt.
+
+After plan approval, AgentPlane `authority.mode=policy|all` can pass routine side effects without
+another Hermes prompt. `policy` allows only `allow_operations`; `all` allows every side effect
+except `deny_operations`; the denylist wins. Drift, unconfigured or denied effects, provider merge,
+destructive or credential boundaries, and unsafe authority recovery still return to the user.
 
 ## Lane registry
 
@@ -126,6 +169,7 @@ Then run `hermes agentplane doctor --json`. `ok=true` requires:
 - valid lane registry with at least one `kind: agentplane` lane;
 - resolvable Hermes and AgentPlane executables;
 - native worker-lane registration;
+- a valid trusted approval-receipt bridge key;
 - a non-empty allowed-root set.
 
 AgentPlane's own `agentplane hermes doctor --json` additionally checks the repository workflow and
